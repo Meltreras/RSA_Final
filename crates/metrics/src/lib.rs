@@ -9,6 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use sysinfo::{CpuExt, System, SystemExt};
 
 fn iso_now() -> String {
@@ -31,6 +32,19 @@ fn create_writer(dir: &str, prefix: &str) -> Writer<File> {
     csv::WriterBuilder::new().has_headers(true).from_writer(file)
 }
 
+fn create_writer_with_role(base_dir: &str, role: &str, prefix: &str) -> Writer<File> {
+    let dir = format!("{}/{}", base_dir, role);
+    let _ = std::fs::create_dir_all(&dir);
+    let filename = format!("{}/{}-{}.csv", dir, prefix, filename_ts());
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .write(true)
+        .open(&filename)
+        .expect("failed to open metrics file");
+    csv::WriterBuilder::new().has_headers(true).from_writer(file)
+}
+
 #[derive(Clone)]
 pub struct Metrics {
     handshake_w: Arc<Mutex<Writer<File>>>,
@@ -41,17 +55,41 @@ pub struct Metrics {
     sys_w: Arc<Mutex<Writer<File>>>,
     loss_w: Arc<Mutex<Writer<File>>>,
     sys: Arc<Mutex<System>>,
+    latency_samples: Arc<Mutex<VecDeque<f64>>>,
+    role: String,
 }
 
 impl Metrics {
     pub fn new(log_dir: &str) -> Result<Self> {
-        let handshake_w = Arc::new(Mutex::new(create_writer(log_dir, "handshake")));
-        let energy_w = Arc::new(Mutex::new(create_writer(log_dir, "energy_summary")));
-        let energy_samples_w = Arc::new(Mutex::new(create_writer(log_dir, "energy_samples")));
-        let throughput_w = Arc::new(Mutex::new(create_writer(log_dir, "throughput")));
-        let latency_w = Arc::new(Mutex::new(create_writer(log_dir, "latency")));
-        let sys_w = Arc::new(Mutex::new(create_writer(log_dir, "system")));
-        let loss_w = Arc::new(Mutex::new(create_writer(log_dir, "loss_errors")));
+        Self::new_with_role(log_dir, "")
+    }
+
+    pub fn new_with_role(log_dir: &str, role: &str) -> Result<Self> {
+        let (handshake_w, energy_w, energy_samples_w, throughput_w, latency_w, sys_w, loss_w) = 
+            if role.is_empty() {
+                // Original single-folder structure for backward compatibility
+                (
+                    Arc::new(Mutex::new(create_writer(log_dir, "handshake"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "energy_summary"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "energy_samples"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "throughput"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "latency"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "system"))),
+                    Arc::new(Mutex::new(create_writer(log_dir, "loss_errors"))),
+                )
+            } else {
+                // New role-based folder structure
+                (
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "handshake"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "energy_summary"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "energy_samples"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "throughput"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "latency"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "system"))),
+                    Arc::new(Mutex::new(create_writer_with_role(log_dir, role, "loss_errors"))),
+                )
+            };
+
         let mut sys = System::new_all();
         sys.refresh_all();
         Ok(Self {
@@ -63,6 +101,8 @@ impl Metrics {
             sys_w,
             loss_w,
             sys: Arc::new(Mutex::new(sys)),
+            latency_samples: Arc::new(Mutex::new(VecDeque::new())),
+            role: role.to_string(),
         })
     }
 
@@ -215,6 +255,16 @@ impl Metrics {
         };
         let mut w = self.latency_w.lock().unwrap();
         w.serialize(rec)?;
+        w.flush()?;
+
+        // Collect latency sample for aggregation
+        let mut samples = self.latency_samples.lock().unwrap();
+        samples.push_back(latency);
+        // Keep only recent samples (e.g., last 1000)
+        if samples.len() > 1000 {
+            samples.pop_front();
+        }
+
         Ok(())
     }
 
@@ -251,6 +301,32 @@ impl Metrics {
         let mut w = self.latency_w.lock().unwrap();
         w.serialize(rec)?;
         w.flush()?;
+        Ok(())
+    }
+
+    /// Calculate and log aggregate latency statistics from collected samples
+    pub fn log_latency_stats_periodic(&self) -> Result<()> {
+        let mut samples = self.latency_samples.lock().unwrap();
+        if samples.len() < 10 {
+            // Need at least 10 samples for meaningful statistics
+            return Ok(());
+        }
+
+        // Convert VecDeque to Vec for statistics calculation
+        let mut latencies: Vec<f64> = samples.iter().copied().collect();
+        let sample_count = latencies.len();
+
+        // Calculate statistics
+        let (mean, p50, p95) = Self::latency_stats(&mut latencies);
+
+        // Log aggregate statistics
+        let role_suffix = if self.role.is_empty() { "" } else { &format!("_{}", self.role) };
+        let name = format!("aggregate{}", role_suffix);
+        self.log_latency_aggregate(&name, mean, p50, p95, sample_count)?;
+
+        // Clear samples after aggregation
+        samples.clear();
+
         Ok(())
     }
 

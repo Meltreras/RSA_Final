@@ -45,8 +45,17 @@ fn parse_rekey(s: &str) -> Option<Duration> {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    // Determine role based on mode for organized logging
+    let role = if has_flag(&args, "--mode=receiver") {
+        "recv"
+    } else if has_flag(&args, "--mode=sender") {
+        "sender"
+    } else {
+        ""
+    };
+
     // try to create metrics; it's optional — app continues if creation fails
-    let metrics = Metrics::new("logs").ok().map(Arc::new);
+    let metrics = Metrics::new_with_role("logs", role).ok().map(Arc::new);
     if let Some(m) = metrics.clone() {
         // background sampler: sample system every 5s and flush periodically
         tokio::spawn(async move {
@@ -56,6 +65,19 @@ async fn main() {
                 let _ = m.flush_all();
             }
         });
+    }
+
+    // Add periodic latency statistics aggregation for receiver
+    if let Some(m) = metrics.clone() {
+        if role == "recv" {
+            let metrics_clone = m.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(10)).await; // Every 10 seconds
+                    let _ = metrics_clone.log_latency_stats_periodic();
+                }
+            });
+        }
     }
 
     if args.iter().any(|a| a == "--print-config") {

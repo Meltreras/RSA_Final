@@ -34,14 +34,22 @@ pub async fn run_sender_from_channel(
     let mut sock = tokio::net::TcpStream::connect(host).await.context("connect")?;
     eprintln!("[send] connected to {host}");
 
+    let handshake_start = Instant::now();
     let (mut tx, _rx_unused, shared32) = handshake_client(&mut sock).await.context("handshake_client")?;
+    let handshake_duration = handshake_start.elapsed().as_secs_f64();
     eprintln!("[send] handshake OK");
     // Log handshake if metrics provided
     if let Some(m) = metrics.as_ref() {
-        let _ = m.log_handshake("rsa-oaep", 0.0, 0, false);
+        let _ = m.log_handshake("rsa-oaep", handshake_duration, 2048, false);
     }
     let mut next_rekey_at = rekey_every.map(|d| Instant::now() + d);
     let mut seq: u32 = 0;
+    
+    // Frame timing tracking for FPS calculation
+    let mut last_frame_time = Instant::now();
+    let mut frame_count = 0u64;
+    let mut fps_window_start = Instant::now();
+    let mut fps_window_frames = 0u64;
 
     loop {
         // handle timer first (if set), else wait for a frame
@@ -60,6 +68,10 @@ pub async fn run_sender_from_channel(
                     // rotate local sender key/base
                     let (k_c2s,_)=hkdf_pair_from_shared(&shared32,&salt); tx = aead::AesGcmCtx::new(k_c2s,c2s);
                     seq=0; eprintln!("[send] rekey sent+applied");
+                    // Log rekey as handshake event
+                    if let Some(m) = metrics.as_ref() {
+                        let _ = m.log_handshake("rekey", 0.001, REKEY_PT_LEN, false);
+                    }
                     next_rekey_at = rekey_every.map(|d| Instant::now() + d);
                 }
                 maybe = frame_rx.recv() => {
@@ -74,8 +86,34 @@ pub async fn run_sender_from_channel(
                     seq = seq.wrapping_add(1);
                     // Optionally log throughput per frame (best-effort)
                     if let Some(m) = metrics.as_ref() {
+                        let now = Instant::now();
+                        let interval_s = now.duration_since(last_frame_time).as_secs_f64();
+                        
+                        // Update FPS window tracking
+                        fps_window_frames += 1;
+                        let window_duration = now.duration_since(fps_window_start).as_secs_f64();
+                        
+                        // Calculate FPS over a 1-second rolling window
+                        let fps = if window_duration >= 1.0 {
+                            let calculated_fps = fps_window_frames as f64 / window_duration;
+                            // Reset window
+                            fps_window_start = now;
+                            fps_window_frames = 0;
+                            calculated_fps
+                        } else {
+                            // For early frames, estimate based on current rate but cap at reasonable value
+                            let estimated_fps = if window_duration > 0.0 { 
+                                (fps_window_frames as f64 / window_duration).min(60.0) 
+                            } else { 
+                                30.0 
+                            };
+                            estimated_fps
+                        };
+                        
                         let mbps = (ct.len() as f64) * 8.0 / 1_000_000.0;
-                        let _ = m.log_throughput(mbps, 0.0, ct.len(), 0.0);
+                        let _ = m.log_throughput(mbps, fps, ct.len(), interval_s);
+                        last_frame_time = now;
+                        frame_count += 1;
                     }
                 }
             }
@@ -91,8 +129,34 @@ pub async fn run_sender_from_channel(
             sock.write_all(&hdr).await?; sock.write_all(&ct).await?;
             seq = seq.wrapping_add(1);
             if let Some(m) = metrics.as_ref() {
+                let now = Instant::now();
+                let interval_s = now.duration_since(last_frame_time).as_secs_f64();
+                
+                // Update FPS window tracking
+                fps_window_frames += 1;
+                let window_duration = now.duration_since(fps_window_start).as_secs_f64();
+                
+                // Calculate FPS over a 1-second rolling window
+                let fps = if window_duration >= 1.0 {
+                    let calculated_fps = fps_window_frames as f64 / window_duration;
+                    // Reset window
+                    fps_window_start = now;
+                    fps_window_frames = 0;
+                    calculated_fps
+                } else {
+                    // For early frames, estimate based on current rate but cap at reasonable value
+                    let estimated_fps = if window_duration > 0.0 { 
+                        (fps_window_frames as f64 / window_duration).min(60.0) 
+                    } else { 
+                        30.0 
+                    };
+                    estimated_fps
+                };
+                
                 let mbps = (ct.len() as f64) * 8.0 / 1_000_000.0;
-                let _ = m.log_throughput(mbps, 0.0, ct.len(), 0.0);
+                let _ = m.log_throughput(mbps, fps, ct.len(), interval_s);
+                last_frame_time = now;
+                frame_count += 1;
             }
         }
     }
@@ -112,11 +176,13 @@ pub async fn run_receiver_to_channel(
     let (mut sock, peer) = listener.accept().await.context("accept")?;
     eprintln!("[recv] connection from {peer}");
 
+    let handshake_start = Instant::now();
     let (_tx_unused, mut rx, shared32) = handshake_server(&mut sock).await.context("handshake_server")?;
+    let handshake_duration = handshake_start.elapsed().as_secs_f64();
     eprintln!("[recv] handshake OK");
     // Log handshake if metrics present
     if let Some(m) = metrics.as_ref() {
-        let _ = m.log_handshake("rsa-oaep", 0.0, 0, false);
+        let _ = m.log_handshake("rsa-oaep", handshake_duration, 2048, false);
     }
 
     loop {
@@ -144,6 +210,10 @@ pub async fn run_receiver_to_channel(
             let (k_c2s,_)=hkdf_pair_from_shared(&shared32,&salt);
             rx = aead::AesGcmCtx::new(k_c2s, c2s);
             eprintln!("[recv] rekey applied");
+            // Log rekey as handshake event
+            if let Some(m) = metrics.as_ref() {
+                let _ = m.log_handshake("rekey", 0.001, REKEY_PT_LEN, false);
+            }
             continue;
         }
 
@@ -289,12 +359,13 @@ pub async fn run_receiver(bind: &str, metrics: Option<Arc<Metrics>>) -> Result<(
    let (mut sock, peer) = listener.accept().await.context("accept")?;
    eprintln!("[recv] connection from {peer}");
 
-
+   let handshake_start = Instant::now();
    let (_tx_unused, mut rx, shared32) = handshake_server(&mut sock).await.context("handshake_server")?;
+   let handshake_duration = handshake_start.elapsed().as_secs_f64();
    eprintln!("[recv] handshake OK");
    // Log handshake if metrics present
    if let Some(m) = metrics.as_ref() {
-       let _ = m.log_handshake("rsa-oaep", 0.0, 0, false);
+       let _ = m.log_handshake("rsa-oaep", handshake_duration, 2048, false);
    }
 
 
@@ -338,8 +409,11 @@ pub async fn run_receiver(bind: &str, metrics: Option<Arc<Metrics>>) -> Result<(
            let (k_c2s, _k_s2c) = hkdf_pair_from_shared(&shared32, &salt);
            rx = AesGcmCtx::new(k_c2s, c2s_base);
 
-
            eprintln!("[recv] rekey applied");
+           // Log rekey as handshake event
+           if let Some(m) = metrics.as_ref() {
+               let _ = m.log_handshake("rekey", 0.001, REKEY_PT_LEN, false);
+           }
            continue;
        }
 
@@ -376,11 +450,13 @@ pub async fn run_sender(host: &str, n_frames: u32, rekey_every: Option<Duration>
 
 
    // Handshake must return (tx, rx, shared32). We only use tx + shared32 here.
+   let handshake_start = Instant::now();
    let (mut tx, _rx_unused, shared32) = handshake_client(&mut sock).await.context("handshake_client")?;
+   let handshake_duration = handshake_start.elapsed().as_secs_f64();
    eprintln!("[send] handshake OK");
    // Log handshake if metrics present
    if let Some(m) = metrics.as_ref() {
-       let _ = m.log_handshake("rsa-oaep", 0.0, 0, false);
+       let _ = m.log_handshake("rsa-oaep", handshake_duration, 2048, false);
    }
 
 
@@ -435,8 +511,12 @@ pub async fn run_sender(host: &str, n_frames: u32, rekey_every: Option<Duration>
                // Reset per-key counter and schedule next rekey
                seq = 0;
                eprintln!("[send] rekey sent+applied");
+               // Log rekey as handshake event
+               if let Some(m) = metrics.as_ref() {
+                   let _ = m.log_handshake("rekey", 0.001, REKEY_PT_LEN, false);
+               }
                next_rekey_at = rekey_every.map(|d| Instant::now() + d);
-               continue; // don’t count the control frame
+               continue; // don't count the control frame
            }
        }
 
