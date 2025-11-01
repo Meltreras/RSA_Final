@@ -1,0 +1,1 @@
+{"rustc":3497858488839269495,"features":"[]","declared_features":"[]","target":494563148456800667,"profile":8731458305071235362,"path":15707638378727870838,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/bench-c41d21d1b0889848/dep-bin-bench","checksum":false}}],"rustflags":["-C","target-cpu=native"],"config":2069994364910194474,"compile_kind":0}
