@@ -1,7 +1,0 @@
-/workspaces/rsa_rust/target/release/deps/futures_sink-a5179be92fbdfd33.d: /home/codespace/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-sink-0.3.31/src/lib.rs
-
-/workspaces/rsa_rust/target/release/deps/libfutures_sink-a5179be92fbdfd33.rlib: /home/codespace/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-sink-0.3.31/src/lib.rs
-
-/workspaces/rsa_rust/target/release/deps/libfutures_sink-a5179be92fbdfd33.rmeta: /home/codespace/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-sink-0.3.31/src/lib.rs
-
-/home/codespace/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-sink-0.3.31/src/lib.rs:
